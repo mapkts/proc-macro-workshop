@@ -49,6 +49,17 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 self
             }
         }
+
+        impl #builder_ident {
+            pub fn build(&mut self) -> Result<#struct_ident, Box<dyn std::error::Error>> {
+                Ok(#struct_ident {
+                    executable: self.executable.clone().ok_or("field executable is not set")?,
+                    args: self.args.clone().ok_or("field args is not set")?,
+                    env: self.env.clone().ok_or("field env is not set")?,
+                    current_dir: self.current_dir.clone().ok_or("field current_dir is not set")?,
+                })
+            }
+        }
     };
 
     tokens.into()

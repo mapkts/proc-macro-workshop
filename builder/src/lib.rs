@@ -7,7 +7,6 @@ use syn::{parse_macro_input, DeriveInput};
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
-    // eprintln!("{:#?}", ast);
 
     let struct_id = &ast.ident;
     let builder_id = Ident::new(&format!("{}Builder", struct_id), Span::call_site());
@@ -95,7 +94,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             } else {
                 quote! {
                     pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                        self.#ident = Some(#ident);
+                        self.#ident = std::option::Option::Some(#ident);
                         self
                     }
                 }
@@ -137,8 +136,8 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
         quote! {
             impl #builder_id {
-                pub fn build(&mut self) -> Result<#struct_id, Box<dyn std::error::Error>> {
-                    Ok(#struct_id {
+                pub fn build(&mut self) -> std::result::Result<#struct_id, std::boxed::Box<dyn std::error::Error>> {
+                    std::result::Result::Ok(#struct_id {
                         #(#builder_fields),*
                     })
                 }
@@ -156,7 +155,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     tokens.into()
 }
 
-fn inner_type_of<'a>(outer_type: &str, ty: &'a syn::Type) -> std::option::Option<&'a syn::Type> {
+fn inner_type_of<'a>(outer_type: &str, ty: &'a syn::Type) -> Option<&'a syn::Type> {
     if let syn::Type::Path(syn::TypePath {
         path: syn::Path { segments, .. },
         ..
@@ -193,7 +192,7 @@ fn type_is_option<'a>(ty: &'a syn::Type) -> bool {
     false
 }
 
-fn get_builder_attribute(field: &syn::Field) -> std::option::Option<&syn::Attribute> {
+fn get_builder_attribute(field: &syn::Field) -> Option<&syn::Attribute> {
     for attr in &field.attrs {
         if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
             return Some(attr);
@@ -247,7 +246,6 @@ fn extend(field: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
             }
             lit => {
                 return mk_err(lit);
-                //panic!("expected string, found {:?}", lit);
             }
         }
     } else {

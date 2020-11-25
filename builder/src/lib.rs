@@ -1,11 +1,10 @@
-#![allow(unused)]
 extern crate proc_macro;
 
 use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     // eprintln!("{:#?}", ast);
@@ -29,10 +28,10 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let builder_struct = {
         let builder_fields = fields.iter().map(|field| {
-            // SAFETY: The `unwrap` here is safe because the ident of a named field cannot be `None`.
+            // SAFETY: `unwrap` is safe because the ident of a named field cannot be `None`.
             let ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
-            if type_is_option(ty) {
+            if type_is_option(ty) || get_builder_attribute(&field).is_some() {
                 quote! {
                     #ident: #ty
                 }
@@ -52,8 +51,15 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let builder_fn_impl = {
         let builder_fields = fields.iter().map(|field| {
             let ident = field.ident.as_ref().unwrap();
-            quote! {
-                #ident: None,
+            let ty = &field.ty;
+            if type_is_option(ty) || get_builder_attribute(&field).is_some() {
+                quote! {
+                    #ident: <#ty as std::default::Default>::default()
+                }
+            } else {
+                quote! {
+                    #ident: std::option::Option::None
+                }
             }
         });
 
@@ -61,7 +67,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             impl #struct_id {
                 pub fn builder() -> #builder_id {
                     #builder_id {
-                        #(#builder_fields)*
+                        #(#builder_fields),*
                     }
                 }
             }
@@ -72,10 +78,17 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let builder_methods = fields.iter().map(|field| {
             let ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
-            if let Some(inner_ty) = inner_type_of("Option", ty) {
+            let origin_method = if let Some(inner_ty) = inner_type_of("Option", ty) {
                 quote! {
                     pub fn #ident(&mut self, #ident: #inner_ty) -> &mut Self {
                         self.#ident = Some(#ident);
+                        self
+                    }
+                }
+            } else if get_builder_attribute(&field).is_some() {
+                quote! {
+                    pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                        self.#ident = #ident;
                         self
                     }
                 }
@@ -86,6 +99,17 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                         self
                     }
                 }
+            };
+
+            match extend(&field) {
+                Some((true, extend_method)) => extend_method,
+                Some((false, extend_method)) => {
+                    quote! {
+                        #origin_method
+                        #extend_method
+                    }
+                }
+                None => origin_method,
             }
         });
 
@@ -100,7 +124,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let builder_fields = fields.iter().map(|field| {
             let ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
-            if type_is_option(ty) {
+            if type_is_option(ty) || get_builder_attribute(&field).is_some() {
                 quote! {
                     #ident: self.#ident.clone()
                 }
@@ -124,40 +148,9 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let tokens = quote! {
         #builder_struct
-
         #builder_fn_impl
-
         #builder_methods_impl
-        // impl #builder_id {
-        //     pub fn executable(&mut self, executable: String) -> &mut Self {
-        //         self.executable = Some(executable);
-        //         self
-        //     }
-        //     pub fn args(&mut self, args: Vec<String>) -> &mut Self {
-        //         self.args = Some(args);
-        //         self
-        //     }
-        //     pub fn env(&mut self, env: Vec<String>) -> &mut Self {
-        //         self.env = Some(env);
-        //         self
-        //     }
-        //     pub fn current_dir(&mut self, current_dir: String) -> &mut Self {
-        //         self.current_dir = Some(current_dir);
-        //         self
-        //     }
-        // }
-
         #build_fn_impl
-        // impl #builder_id {
-        //     pub fn build(&mut self) -> Result<#struct_id, Box<dyn std::error::Error>> {
-        //         Ok(#struct_id {
-        //             executable: self.executable.clone().ok_or("field executable is not set")?,
-        //             args: self.args.clone().ok_or("field args is not set")?,
-        //             env: self.env.clone().ok_or("field env is not set")?,
-        //             current_dir: self.current_dir.clone().ok_or("field current_dir is not set")?,
-        //         })
-        //     }
-        // }
     };
 
     tokens.into()
@@ -198,4 +191,65 @@ fn type_is_option<'a>(ty: &'a syn::Type) -> bool {
         }
     };
     false
+}
+
+fn get_builder_attribute(field: &syn::Field) -> std::option::Option<&syn::Attribute> {
+    for attr in &field.attrs {
+        if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
+            return Some(attr);
+        }
+    }
+    None
+}
+
+fn extend(field: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
+    let ident = field.ident.as_ref().unwrap();
+
+    fn mk_err<T: quote::ToTokens>(t: T) -> Option<(bool, proc_macro2::TokenStream)> {
+        Some((
+            false,
+            syn::Error::new_spanned(t, "expected `builder(each = \"...\")`").to_compile_error(),
+        ))
+    }
+
+    if let Some(attr) = get_builder_attribute(&field) {
+        let meta = match attr.parse_meta() {
+            Ok(syn::Meta::List(mut metalist)) => {
+                if metalist.nested.len() != 1 {
+                    return mk_err(metalist);
+                }
+
+                match metalist.nested.pop().unwrap().into_value() {
+                    syn::NestedMeta::Meta(syn::Meta::NameValue(nv)) => {
+                        if nv.path.get_ident().unwrap() != "each" {
+                            return mk_err(metalist);
+                        }
+                        nv
+                    }
+                    meta => return mk_err(meta),
+                }
+            }
+            Ok(meta) => return mk_err(meta),
+            Err(e) => return Some((false, e.to_compile_error())),
+        };
+
+        match &meta.lit {
+            syn::Lit::Str(s) => {
+                let arg = syn::Ident::new(&s.value(), s.span());
+                let inner_ty = inner_type_of("Vec", &field.ty).unwrap();
+                let method = quote! {
+                    pub fn #arg(&mut self, #arg: #inner_ty) -> &mut Self {
+                        self.#ident.push(#arg);
+                        self
+                    }
+                };
+                Some((&arg == ident, method))
+            }
+            lit => {
+                panic!("expected string, found {:?}", lit);
+            }
+        }
+    } else {
+        None
+    }
 }

@@ -246,7 +246,8 @@ fn extend(field: &syn::Field) -> Option<(bool, proc_macro2::TokenStream)> {
                 Some((&arg == ident, method))
             }
             lit => {
-                panic!("expected string, found {:?}", lit);
+                return mk_err(lit);
+                //panic!("expected string, found {:?}", lit);
             }
         }
     } else {
